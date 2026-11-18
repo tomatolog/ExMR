@@ -21,9 +21,6 @@ from exmr.geometry.rotation_conversions import quaternion_to_matrix
 from exmr.preprocessing.video import frame_paths, frame_size, read_frames
 
 DPVO_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "DPVO"
-# (brawler fork) a SimpleVO step with fewer matches keeps the camera still (two-view geometry
-# needs min_num_inliers=10 inliers anyway)
-MIN_MATCHES = 10
 
 
 class SimpleVO:
@@ -80,14 +77,16 @@ class SimpleVO:
         features = self._features(frames[0])
         for frame in tqdm(frames[1:], desc="Visual odometry", disable=not self.progress):
             prev, features = features, self._features(frame)
-            pts0, pts1 = _match(prev, features)
-            if len(pts0) < MIN_MATCHES:
-                # (brawler fork) too few matches, e.g. a black frame: keep the camera still for
-                # this step instead of failing in FLANN or in the two-view geometry
+            if _no_features(prev) or _no_features(features):
+                # (brawler fork) a frame without SIFT features (e.g. a black frame at a cut) made
+                # FLANN fail: keep the camera still for this step and match the next frame against
+                # the last frame with features; frames with features run exactly as upstream
                 self.skipped_steps += 1
                 T_w2c.append(T_w2c[-1].copy())
-                features = prev  # the next frame is matched against the last good one
+                if _no_features(features):
+                    features = prev
                 continue
+            pts0, pts1 = _match(prev, features)
             matches = np.stack([np.arange(len(pts0)), np.arange(len(pts0))], axis=-1)
             answer = pycolmap.estimate_calibrated_two_view_geometry(
                 camera, pts0.astype(np.float64), camera, pts1.astype(np.float64),
@@ -109,13 +108,16 @@ def _match(features0, features1):
     """FLANN matches of two images' SIFT features with Lowe's ratio test -> (N, 2), (N, 2)
     float32 points."""
     (kp0, des0), (kp1, des1) = features0, features1
-    if des0 is None or des1 is None or len(des0) < 2 or len(des1) < 2:  # (brawler fork) no features
-        return np.zeros((0, 2), np.float32), np.zeros((0, 2), np.float32)
     flann = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))  # KD-tree
     good = [m for m, n in flann.knnMatch(des0, des1, k=2) if m.distance < 0.7 * n.distance]
     pts0 = np.float32([kp0[m.queryIdx].pt for m in good]).reshape(-1, 2)
     pts1 = np.float32([kp1[m.trainIdx].pt for m in good]).reshape(-1, 2)
     return pts0, pts1
+
+
+def _no_features(features):
+    """(brawler fork) True for an image without SIFT descriptors (FLANN cannot index it)."""
+    return features[1] is None or len(features[1]) < 2
 
 
 @contextlib.contextmanager

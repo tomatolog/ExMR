@@ -11,10 +11,11 @@ One fork is used everywhere — the ZeroGPU Space and local runs — so that eve
    - **The fix.** `global_traj.up_from_camera_gv` estimates the gravity direction once, over the first `UP_INIT_SECONDS` (0.5 s), in the camera of frame 0. It then carries that direction to every frame with the camera rotation, and rebuilds each frame's gravity-view frame from it before `rollout_global_params`. Everything after the rollout uses the corrected orientation: static-joint translation, `snap_to_ground`, IK and foot contacts.
    - **Diagnostics.** `forward` also returns `up_correction_deg` (B, L): the angle between the network's gravity direction and the carried one, per frame.
    - **Limits.** The result is only as good as the camera rotation from SimpleVO or DPVO. The first 0.5 s must show the true vertical; a wrong start keeps its error for the whole clip.
-2. **SimpleVO guard.** A sampled frame with no SIFT features crashed FLANN with `cv2.error (-210) in buildIndex_`, for example a black frame at a cut. Now `_match` returns no matches for such a frame. A step with fewer than `MIN_MATCHES` (10) matches keeps the camera still, and the next frame is matched against the last good one. `SimpleVO.skipped_steps` counts these steps.
+2. **SimpleVO guard.** A sampled frame with no SIFT features, for example a black frame at a cut, crashed FLANN with `cv2.error (-210) in buildIndex_`. Now a step that involves such a frame keeps the camera still, and the next frame is matched against the last frame that has features. `SimpleVO.skipped_steps` counts these steps. Frames that have features run exactly as upstream.
+   - The first version (f4fe850) also skipped every step with fewer than 10 matches. That changed the camera on clips that upstream handles without a crash, so it was narrowed in v0.1.5-brawler.2.
 
 ## Tests
 
 The tests are CPU-only and need no weights. They are kept in the brawler lab run `2026-11-18-e12-exmr-space-up-01`:
 - `test_fork_patch.py`, a synthetic scene: a 30° camera roll that the network takes for a lean drops from 29.5° to 0.00°; pure pitch and yaw, and a still camera, are unchanged.
-- `test_vo_guard.py`: real SIFT on a black frame gives 0 matches and no error.
+- `test_vo_guard.py`: real SIFT. The black frame is detected as having no features; normal frames are not, and they still match (511 matches).
