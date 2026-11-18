@@ -14,6 +14,10 @@ One fork is used everywhere — the ZeroGPU Space and local runs — so that eve
 2. **SimpleVO guard.** A sampled frame with no SIFT features, for example a black frame at a cut, crashed FLANN with `cv2.error (-210) in buildIndex_`. Now a step that involves such a frame keeps the camera still, and the next frame is matched against the last frame that has features. `SimpleVO.skipped_steps` counts these steps. Frames that have features run exactly as upstream.
    - The first version (f4fe850) also skipped every step with fewer than 10 matches. That changed the camera on clips that upstream handles without a crash, so it was narrowed in v0.1.5-brawler.2.
 
+3. **`vo_step`.** Sets SimpleVO's sampling step. It is available as `pipeline.Options.vo_step` (1–8, default 8 as upstream) and `tools/demo.py --vo_step`.
+   - SimpleVO matches every `vo_step`-th frame and interpolates the rotation between them (SLERP). Smaller steps follow fast camera moves (whip pans, a hand-held camera) more closely, at more CPU time.
+   - The step is part of the camera-rotation cache key.
+
 ## Tests
 
 The tests are CPU-only and need no weights. They are kept in the brawler lab run `2026-11-18-e12-exmr-space-up-01`:

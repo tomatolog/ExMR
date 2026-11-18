@@ -97,6 +97,14 @@ def main():
         "when the feet end up far above the ground.",
     )
     parser.add_argument(
+        "--vo_step",
+        type=int,
+        default=8,
+        help="(brawler fork) SimpleVO matches every vo_step-th frame and interpolates between them "
+        "(upstream: 8); smaller steps follow fast camera moves (whip pans, a hand-held camera) "
+        "closer and cost more CPU time; 1 = every frame.",
+    )
+    parser.add_argument(
         "--up_from_camera",
         action="store_true",
         help="(brawler fork) estimate the gravity direction at the start and carry it with the "
@@ -170,6 +178,7 @@ def main():
         fps30=args.fps30,
         snap_to_ground=args.snap_to_ground,
         up_from_camera=args.up_from_camera,
+        vo_step=args.vo_step,
         export_fps=args.export_fps,
         smoothing=args.smoothing,
         render=not args.no_render,

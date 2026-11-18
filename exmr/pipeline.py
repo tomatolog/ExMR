@@ -48,6 +48,7 @@ class Options:
     fps30: bool = False  # resample to 30 fps first (usually not needed; faster for e.g. 60 fps)
     snap_to_ground: bool = False  # flat ground, nothing to stand on: no vertical drift
     up_from_camera: bool = False  # gravity carried by the camera rotation (rolling camera; brawler fork)
+    vo_step: int = 8  # SimpleVO matches every vo_step-th frame, 1 = every frame (brawler fork; upstream 8)
     export_fps: float | None = None  # frame rate of the AMASS and BVH files (None: the video's)
     smoothing: str = "global"  # smooth the motion over time: "global" (world frame), "both", "none"
     render: bool = True
@@ -59,6 +60,7 @@ class Options:
             ("sapiens2_resolution", ["1024x768", "576x432", "448x336"]),
             ("detector", ["yolo11m", "yolo11x"]),
             ("vo", ["simplevo", "dpvo"]),
+            ("vo_step", list(range(1, 9))),
             ("smoothing", ["global", "both", "none"]),
         ]:
             if getattr(self, name) not in choices:
@@ -195,6 +197,7 @@ def _preprocess(video_path, frame_dir, L, width, height, options, assets, cache)
         "video": str(video_path),
         "frames": L,
         "odometry": options.vo,
+        "vo_step": options.vo_step,  # (brawler fork) the cached rotations depend on it
         "f_mm": options.f_mm,
         "exmr": __version__,
     }
@@ -205,7 +208,7 @@ def _preprocess(video_path, frame_dir, L, width, height, options, assets, cache)
     use_simplevo = options.vo == "simplevo" and not options.static_cam
     if use_simplevo and not _is_cached(vo_cache, vo_settings):
         log.info("Starting visual odometry in the background")
-        simplevo = _in_background(_simplevo_rotations, frame_dir, options.f_mm)
+        simplevo = _in_background(_simplevo_rotations, frame_dir, options.f_mm, options.vo_step)
 
     # RTMW's session build and warm-up run in a thread while
     # the tracker runs, which hides about half of it
@@ -299,13 +302,14 @@ def model_inputs(kp2d, bbx_xyxy, K_fullimg, R_w2c, body_feat, hand_feat, backend
     }
 
 
-def _simplevo_rotations(frame_dir, f_mm=None):
+def _simplevo_rotations(frame_dir, f_mm=None, step=8):
     """SimpleVO's (L, 3, 3) camera rotations, as a numpy array: torch tensors would be returned
     from the separate process through shared memory. f_mm: the focal length (SimpleVO's default
     if None)."""
     from exmr.preprocessing.visual_odometry import SimpleVO
 
-    vo = SimpleVO(progress=False) if f_mm is None else SimpleVO(f_mm=f_mm, progress=False)
+    kwargs = {"step": int(step), "progress": False}  # (brawler fork) step: SimpleVO's sampling step
+    vo = SimpleVO(**kwargs) if f_mm is None else SimpleVO(f_mm=f_mm, **kwargs)
     return vo(frame_dir).numpy()
 
 
