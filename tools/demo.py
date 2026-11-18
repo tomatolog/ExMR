@@ -97,6 +97,13 @@ def main():
         "when the feet end up far above the ground.",
     )
     parser.add_argument(
+        "--up_from_camera",
+        action="store_true",
+        help="(brawler fork) estimate the gravity direction at the start and carry it with the "
+        "camera rotation, instead of per frame from the image: for a camera that rolls or tilts "
+        "during the video, whose roll the network otherwise takes for a leaning body.",
+    )
+    parser.add_argument(
         "--export_fps",
         type=float,
         help="frame rate of the exported motion (<video name>_amass.npz and .bvh), e.g. 24 for "
@@ -162,6 +169,7 @@ def main():
         f_mm=args.f_mm,
         fps30=args.fps30,
         snap_to_ground=args.snap_to_ground,
+        up_from_camera=args.up_from_camera,
         export_fps=args.export_fps,
         smoothing=args.smoothing,
         render=not args.no_render,

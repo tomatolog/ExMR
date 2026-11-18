@@ -86,6 +86,7 @@ class ExMR(nn.Module):
         smooth_incam=False,
         smooth_global=True,
         fps=30.0,
+        up_from_camera=False,
     ):
         """
         Args:
@@ -110,6 +111,10 @@ class ExMR(nn.Module):
             smooth_global: smooth the world-frame motion over time (Gaussian, SMOOTHING_SIGMA)
             fps: frame rate of the video, for the time windows of snap_to_ground, of the
                 static-camera drift correction and of the smoothing
+            up_from_camera: the world frame's gravity is estimated over the first
+                global_traj.UP_INIT_SECONDS and carried by the camera rotation (cam_angvel),
+                instead of the network's per-frame estimate, which takes a rolling camera for a
+                leaning body (brawler fork, see global_traj.up_from_camera_gv)
         Returns:
             dict with
               smplx_incam: SMPL-X parameters in the camera frame (each (B, L, D))
@@ -118,6 +123,8 @@ class ExMR(nn.Module):
                   at x=z=0 facing +z)
               static_conf_logits: (B, L, 6) logits of being static (not moving) for
                   [L_ankle, L_foot, R_ankle, R_foot, L_wrist, R_wrist]
+              up_correction_deg: (B, L) with up_from_camera: the angle between the network's
+                  and the carried gravity direction per frame (otherwise zeros)
         """
         B, L = kp2d.shape[:2]
         if length is None:
@@ -181,13 +188,22 @@ class ExMR(nn.Module):
         smplx_incam["right_hand_pose"] = finger_aa[:, :, 45:]
 
         # 4. world frame: same articulation, rolled-out root trajectory
+        global_orient_gv = params["global_orient_gv"]
+        up_correction = torch.zeros(B, L, device=global_orient_gv.device)
+        if up_from_camera:
+            global_orient_gv, up_correction = global_traj.up_from_camera_gv(
+                global_orient_gv,
+                smplx_incam["global_orient"],
+                cam_angvel,
+                round(global_traj.UP_INIT_SECONDS * fps),
+            )
         smplx_global = {
             "body_pose": body_pose,
             "betas": smplx_incam["betas"],
             "left_hand_pose": smplx_incam["left_hand_pose"],
             "right_hand_pose": smplx_incam["right_hand_pose"],
             **global_traj.rollout_global_params(
-                params["global_orient_gv"],
+                global_orient_gv,
                 params["local_transl_vel"],
                 smplx_incam["global_orient"],
                 cam_angvel,
@@ -230,4 +246,5 @@ class ExMR(nn.Module):
             "smplx_incam": smplx_incam,
             "smplx_global": smplx_global,
             "static_conf_logits": static_conf_logits,
+            "up_correction_deg": up_correction,
         }

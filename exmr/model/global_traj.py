@@ -30,6 +30,52 @@ FOOT_CONTACT_HEIGHT = 0.05
 # the slow part of the deviation (Gaussian smoothing, sigma in seconds) is removed
 CAMERA_DEAD_BAND = 0.25
 CAMERA_DRIFT_SIGMA = 2.0
+# up_from_camera: the gravity direction is estimated over this many seconds at the start
+UP_INIT_SECONDS = 0.5
+
+
+def up_from_camera_gv(global_orient_gv, global_orient_c, cam_angvel, init_frames):
+    """Gravity-view root orientations whose gravity follows the camera rotation (brawler fork).
+
+    The network estimates the gravity direction in every frame from that frame alone; when the
+    camera rolls or tilts during the video (a hand-held or rolling shot), the estimate follows the
+    rolled image and the body leans by the camera's roll in the world frame. Here the gravity
+    direction is estimated once, from the first init_frames frames, in the camera of frame 0, and
+    carried to every frame by the camera rotation (cam_angvel), so the camera's roll and tilt are
+    not taken for the body's. The camera-frame root orientation (global_orient_c) is kept; the
+    GV frame of each frame is rebuilt from the carried gravity and the camera's view direction.
+
+    Args:
+        global_orient_gv: (B, L, 3) root orientation in the per-frame GV frame (network)
+        global_orient_c: (B, L, 3) root orientation in the camera frame
+        cam_angvel: (B, L, 6) camera rotation from frame t to t+1 (6D), R @ R_w2c^t = R_w2c^t+1
+        init_frames: frames at the start over which the gravity direction is averaged
+    Returns:
+        (B, L, 3) root orientation in the rebuilt GV frames, and (B, L) angle (degrees) between the
+        network's and the carried gravity direction per frame (the correction applied)
+    """
+    B, L = global_orient_gv.shape[:2]
+    R_step = rotation_6d_to_matrix(cam_angvel)  # (B, L, 3, 3), frame t -> t+1
+    R_w2c = [torch.eye(3, dtype=R_step.dtype, device=R_step.device).expand(B, 3, 3)]
+    for t in range(L - 1):
+        R_w2c.append(R_step[:, t] @ R_w2c[-1])
+    R_w2c = torch.stack(R_w2c, dim=1)  # (B, L, 3, 3): camera of frame 0 -> camera of frame t
+    R_gv = axis_angle_to_matrix(global_orient_gv)
+    R_c = axis_angle_to_matrix(global_orient_c)
+    R_c2gv = R_gv @ R_c.mT  # camera -> GV (network), per frame
+    down_c = R_c2gv[..., 1, :]  # GV y (down) in camera coordinates, per frame (network)
+    down_0 = (R_w2c.mT @ down_c[..., None])[..., 0]  # ... in the camera of frame 0
+    k = max(1, min(int(init_frames), L))
+    d0 = F.normalize(down_0[:, :k].mean(dim=1), dim=-1)  # (B, 3)
+    down_t = F.normalize((R_w2c @ d0[:, None, :, None])[..., 0], dim=-1)  # carried, camera of t
+    view = torch.tensor([0.0, 0.0, 1.0], dtype=R_c.dtype, device=R_c.device).expand_as(down_t)
+    z = F.normalize(view - (view * down_t).sum(-1, keepdim=True) * down_t, dim=-1)
+    x = torch.linalg.cross(down_t, z, dim=-1)
+    R_c2gv_new = torch.stack([x, down_t, z], dim=-2)  # rows: GV axes in camera coordinates
+    correction = torch.rad2deg(
+        torch.acos(torch.clamp((F.normalize(down_c, dim=-1) * down_t).sum(-1), -1.0, 1.0))
+    )
+    return matrix_to_axis_angle(R_c2gv_new @ R_c), correction
 
 
 def rollout_global_params(global_orient_gv, local_transl_vel, global_orient_c, cam_angvel):

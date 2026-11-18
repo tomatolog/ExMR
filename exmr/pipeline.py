@@ -47,6 +47,7 @@ class Options:
     f_mm: float | None = None  # the camera's focal length (mm, full-frame equivalent), if known
     fps30: bool = False  # resample to 30 fps first (usually not needed; faster for e.g. 60 fps)
     snap_to_ground: bool = False  # flat ground, nothing to stand on: no vertical drift
+    up_from_camera: bool = False  # gravity carried by the camera rotation (rolling camera; brawler fork)
     export_fps: float | None = None  # frame rate of the AMASS and BVH files (None: the video's)
     smoothing: str = "global"  # smooth the motion over time: "global" (world frame), "both", "none"
     render: bool = True
@@ -320,6 +321,7 @@ def _run_model(data, options, fps, assets):
         **inputs,
         static_cam=options.static_cam,
         snap_to_ground=options.snap_to_ground,
+        up_from_camera=options.up_from_camera,
         smooth_incam=options.smoothing == "both",
         smooth_global=options.smoothing != "none",
         fps=fps,
