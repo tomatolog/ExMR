@@ -46,6 +46,11 @@ For a video with `L` frames:
 | `joint_names` | 76 | names of the joints, e.g. `left_heel` |
 | `static_conf_logits` | `(L, 6)` | logits of [left ankle, left foot, right ankle, right foot, left wrist, right wrist] being static (not moving in the world frame: usually, but not necessarily, in contact with the ground or an object) |
 | `foot_contact` | `(L, 2)` | whether the [left, right] foot touches the ground: its ankle or foot is static (`static_conf_logits` above 0.8 in probability) and it is the lowest part of the body (within 5 cm), e.g. to lock the feet when retargeting the motion to another character |
+| `foot_seen` | `(L, 2)` bool | (brawler fork) whether the [left, right] foot is seen in the video: one of its 2D keypoints (ankle, big toe, small toe, heel) has a confidence above 0.5, the body network's own visibility threshold. Where it is not seen (outside the frame, hidden) the network gets no evidence of the foot: its leg motion is a guess and `static_conf_logits` of that foot is about 0, so the post-processing does not hold it — do not trust the foot's placement or contact there |
+| `foot_hold_source` | `(L, 2)` int8 | (brawler fork) why the [left, right] foot is held by the post-processing: 0 not held, 1 the network's static confidence (above 0.8 for its ankle or foot joint), 2 the `--unseen_foot_rule` (only on frames where the foot is not seen) |
+| `foot_ik_shift` | `(L, 2)` | (brawler fork) how far (m) the post-processing IK moved the [left, right] ankle on that frame |
+| `static_conf_logits_effective` | `(L, 6)` | (brawler fork) the logits the post-processing used: `static_conf_logits` with the `--unseen_foot_rule`'s contacts raised; equal to it with the default rule `none`; `foot_contact` is computed from these |
+| `smplx_global_raw` | dict | (brawler fork) `smplx_global` before the post-processing (root correction, snap, IK, smoothing, ground, facing): with `smplx_incam`, `static_conf_logits` and `foot_seen` the post-processing can be re-run without the network, `exmr.model.exmr.postprocess_world` |
 | `K_fullimg` | <code>(L,&nbsp;3,&nbsp;3)</code> | camera intrinsics used (from `--f_mm`, else estimated from the image size) |
 | `bbx_xyxy` | `(L, 4)` | tracked bounding box of the person, `[x1, y1, x2, y2]` in pixels |
 | `fps` | float | frame rate of the processed video |
