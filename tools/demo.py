@@ -105,6 +105,12 @@ def main():
         "closer and cost more CPU time; 1 = every frame.",
     )
     parser.add_argument(
+        "--side_static_hold",
+        action="store_true",
+        help="(brawler fork) hold a foot predicted static as a whole (ankle and foot joint) when its "
+        "ankle confidence is at least 0.5; implies --hard_static_hold.",
+    )
+    parser.add_argument(
         "--hard_static_hold",
         action="store_true",
         help="(brawler fork) the IK holds ankles / feet / wrists predicted static (confidence above "
@@ -186,6 +192,7 @@ def main():
         snap_to_ground=args.snap_to_ground,
         up_from_camera=args.up_from_camera,
         hard_static_hold=args.hard_static_hold,
+        side_static_hold=args.side_static_hold,
         vo_step=args.vo_step,
         export_fps=args.export_fps,
         smoothing=args.smoothing,

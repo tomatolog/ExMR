@@ -21,6 +21,10 @@ STATIC_JOINT_IDS = [7, 10, 8, 11, 20, 21]
 CONTACT_INTERVAL = 0.5
 # static_joint_ik: a toe's IK target stays this close (m, per axis) to the network's toe
 TOE_TARGET_MAX_OFFSET = 0.03
+# (brawler fork) side_static_hold: a side is held as a whole when its ankle's static confidence is at least
+# SIDE_ANKLE_MIN; its toe target may then lie up to SIDE_TOE_MAX_OFFSET (m) from the network's toe
+SIDE_ANKLE_MIN = 0.5
+SIDE_TOE_MAX_OFFSET = 0.10
 # foot_contacts: a foot touches the ground where its ankle or toe is predicted static (not
 # moving) with at least STATIC_CONF and it is at most FOOT_CONTACT_HEIGHT (m) above the lowest
 # point of the body
@@ -292,15 +296,26 @@ def foot_contacts(smplx_global, static_conf_logits, body_model):
     return (static > STATIC_CONF) & (heights[..., :2] <= lowest), heights[..., :2]
 
 
-def static_joint_targets(joints, static_conf, hard=False):
+def static_joint_targets(joints, static_conf, hard=False, side=False):
     """IK targets of the static joints: x[t] = c[t-1] * x[t-1] + (1 - c[t-1]) * fk[t], i.e. a
     static joint stays where it was in the previous frame, weighted by its static confidence c.
     Solved as a parallel prefix scan of the affine recursion x[t] = a[t] * x[t-1] + b[t] (a[0] = 0
     keeps the first frame). (brawler fork) hard: a confidence above STATIC_CONF counts as 1, so a
     joint predicted static is held exactly, not with 10-20 % of the network's motion per frame.
 
+    side (brawler fork): a foot (ankle + foot joint, STATIC_JOINT_IDS order L_ankle, L_foot, R_ankle,
+    R_foot) whose larger confidence is above STATIC_CONF and whose ankle confidence is at least
+    SIDE_ANKLE_MIN is held as a whole (both weights 1); implies hard.
+
     joints: (B, L, J, 3) the static joints' positions; static_conf: (B, L, J) -> (B, L, J, 3)
     """
+    if side:
+        static_conf = static_conf.clone()
+        for a in (0, 2):  # ankle index of each foot; a + 1 is its foot joint
+            pair = static_conf[..., a : a + 2]
+            held = (pair.amax(dim=-1) > STATIC_CONF) & (static_conf[..., a] >= SIDE_ANKLE_MIN)
+            static_conf[..., a : a + 2] = torch.where(held[..., None], torch.ones_like(pair), pair)
+        hard = True
     if hard:
         static_conf = torch.where(static_conf > STATIC_CONF, torch.ones_like(static_conf), static_conf)
     a = torch.cat(
@@ -315,7 +330,7 @@ def static_joint_targets(joints, static_conf, hard=False):
     return b
 
 
-def static_joint_ik(smplx_global, static_conf_logits, decoder, hard=False):
+def static_joint_ik(smplx_global, static_conf_logits, decoder, hard=False, side=False):
     """Inverse kinematics so that ankles, feet and wrists predicted static stay put.
 
     hard (brawler fork): hold joints with a static confidence above STATIC_CONF exactly, see
@@ -326,14 +341,15 @@ def static_joint_ik(smplx_global, static_conf_logits, decoder, hard=False):
 
     post_target_j3d = post_w_j3d.clone()
     post_target_j3d[:, :, STATIC_JOINT_IDS] = static_joint_targets(
-        post_w_j3d[:, :, STATIC_JOINT_IDS], static_conf, hard
+        post_w_j3d[:, :, STATIC_JOINT_IDS], static_conf, hard, side
     )
     # a toe predicted static can lie far from where it was when its contact began; pulling it all
     # the way back turns the ankle a lot (tens of degrees), against the network's ankle. Bounded
     # per axis like FlowHMR's ankle targets (github.com/flowhmr/flowhmr, runtime_v2m_postprocess)
     toes = [10, 11]
     offset = post_target_j3d[:, :, toes] - post_w_j3d[:, :, toes]
-    offset = offset.clamp(-TOE_TARGET_MAX_OFFSET, TOE_TARGET_MAX_OFFSET)
+    bound = SIDE_TOE_MAX_OFFSET if side else TOE_TARGET_MAX_OFFSET  # (brawler fork) side_static_hold
+    offset = offset.clamp(-bound, bound)
     post_target_j3d[:, :, toes] = post_w_j3d[:, :, toes] + offset
 
     parents = decoder.parents

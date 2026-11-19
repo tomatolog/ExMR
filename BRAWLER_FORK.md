@@ -28,6 +28,11 @@ One fork is used everywhere — the ZeroGPU Space and local runs — so that eve
    - With the option, a confidence above `STATIC_CONF` (0.8, the threshold of `foot_contacts`) counts as 1: the joint is held exactly. The toe target stays within `TOE_TARGET_MAX_OFFSET` (3 cm) of the network's toe, as upstream.
    - The target recursion is now `global_traj.static_joint_targets`, testable without a body model.
 
+6. **`side_static_hold`** (same probe branch). Off by default; implies `hard_static_hold`.
+   - With `hard_static_hold` alone, a foot on the ground often keeps sliding: ExMR sets foot contact by the larger of the ankle and foot-joint confidences, and the ankle is frequently below 0.8, so only the foot joint is held, within 3 cm of the network's toe.
+   - With the option, a foot whose larger confidence is above `STATIC_CONF` and whose ankle confidence is at least `SIDE_ANKLE_MIN` (0.5) is held as a whole (both joints), and the toe target may lie up to `SIDE_TOE_MAX_OFFSET` (0.10 m) from the network's toe.
+   - The ankle threshold trades holding truly standing feet against sticking truly moving ones (Harmony4D truth: 81 % / 42 % of the contact frames at 0.5).
+
 ## Tests
 
 The tests are CPU-only and need no weights. They are kept in the brawler lab run `2026-11-18-e12-exmr-space-up-01`:

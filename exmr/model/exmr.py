@@ -88,6 +88,7 @@ class ExMR(nn.Module):
         fps=30.0,
         up_from_camera=False,
         hard_static_hold=False,
+        side_static_hold=False,
     ):
         """
         Args:
@@ -119,6 +120,9 @@ class ExMR(nn.Module):
             hard_static_hold: with postprocess, joints predicted static with a confidence above
                 global_traj.STATIC_CONF are held exactly by the IK instead of with the weight of
                 their confidence (brawler fork, see global_traj.static_joint_targets)
+            side_static_hold: with postprocess, a foot predicted static is held as a whole (ankle and
+                foot joint) when its ankle confidence is at least global_traj.SIDE_ANKLE_MIN, with a
+                looser toe bound (brawler fork; implies hard_static_hold)
         Returns:
             dict with
               smplx_incam: SMPL-X parameters in the camera frame (each (B, L, D))
@@ -229,7 +233,8 @@ class ExMR(nn.Module):
             smplx_global["transl"] = global_traj.snap_to_ground(smplx_global, self.body_model, fps)
         if postprocess:
             smplx_global["body_pose"] = global_traj.static_joint_ik(
-                smplx_global, static_conf_logits, self.decoder, hard=hard_static_hold
+                smplx_global, static_conf_logits, self.decoder, hard=hard_static_hold,
+                side=side_static_hold,
             )
 
         # 5. temporal smoothing, after the IK so that it also smooths the IK's changes
