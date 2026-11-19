@@ -23,6 +23,11 @@ One fork is used everywhere — the ZeroGPU Space and local runs — so that eve
    - `DPVO()` sets torch's CPU thread count to 2 for the whole process; the wrapper now restores the previous count when DPVO has finished.
    - DPVO itself (CUDA extensions, torch-scatter) is installed from wheels built for the Space's torch; see the brawler lab run `2026-11-19-e12-exmr-dpvo-probe-01`.
 
+5. **`hard_static_hold`** (branch `brawler/static-hold-probe`, local probe, not released). Off by default. Available as `ExMR.forward(..., hard_static_hold=True)`, `pipeline.Options.hard_static_hold` and `tools/demo.py --hard_static_hold`.
+   - Upstream's IK target of a static joint is `x[t] = c x[t-1] + (1 - c) fk[t]`: with a static confidence c of 0.8-0.9 the held foot still follows 10-20 % of the network's motion per frame, so it slides.
+   - With the option, a confidence above `STATIC_CONF` (0.8, the threshold of `foot_contacts`) counts as 1: the joint is held exactly. The toe target stays within `TOE_TARGET_MAX_OFFSET` (3 cm) of the network's toe, as upstream.
+   - The target recursion is now `global_traj.static_joint_targets`, testable without a body model.
+
 ## Tests
 
 The tests are CPU-only and need no weights. They are kept in the brawler lab run `2026-11-18-e12-exmr-space-up-01`:

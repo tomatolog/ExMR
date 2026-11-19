@@ -49,6 +49,7 @@ class Options:
     snap_to_ground: bool = False  # flat ground, nothing to stand on: no vertical drift
     up_from_camera: bool = False  # gravity carried by the camera rotation (rolling camera; brawler fork)
     vo_step: int = 8  # SimpleVO matches every vo_step-th frame, 1 = every frame (brawler fork; upstream 8)
+    hard_static_hold: bool = False  # IK holds joints predicted static exactly (brawler fork)
     export_fps: float | None = None  # frame rate of the AMASS and BVH files (None: the video's)
     smoothing: str = "global"  # smooth the motion over time: "global" (world frame), "both", "none"
     render: bool = True
@@ -326,6 +327,7 @@ def _run_model(data, options, fps, assets):
         static_cam=options.static_cam,
         snap_to_ground=options.snap_to_ground,
         up_from_camera=options.up_from_camera,
+        hard_static_hold=options.hard_static_hold,
         smooth_incam=options.smoothing == "both",
         smooth_global=options.smoothing != "none",
         fps=fps,

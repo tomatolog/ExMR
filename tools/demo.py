@@ -105,6 +105,13 @@ def main():
         "closer and cost more CPU time; 1 = every frame.",
     )
     parser.add_argument(
+        "--hard_static_hold",
+        action="store_true",
+        help="(brawler fork) the IK holds ankles / feet / wrists predicted static (confidence above "
+        "0.8) exactly where they were, instead of with the weight of their confidence: less foot "
+        "sliding on the ground.",
+    )
+    parser.add_argument(
         "--up_from_camera",
         action="store_true",
         help="(brawler fork) estimate the gravity direction at the start and carry it with the "
@@ -178,6 +185,7 @@ def main():
         fps30=args.fps30,
         snap_to_ground=args.snap_to_ground,
         up_from_camera=args.up_from_camera,
+        hard_static_hold=args.hard_static_hold,
         vo_step=args.vo_step,
         export_fps=args.export_fps,
         smoothing=args.smoothing,

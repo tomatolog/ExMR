@@ -292,28 +292,42 @@ def foot_contacts(smplx_global, static_conf_logits, body_model):
     return (static > STATIC_CONF) & (heights[..., :2] <= lowest), heights[..., :2]
 
 
-def static_joint_ik(smplx_global, static_conf_logits, decoder):
-    """Inverse kinematics so that ankles, feet and wrists predicted static stay put.
+def static_joint_targets(joints, static_conf, hard=False):
+    """IK targets of the static joints: x[t] = c[t-1] * x[t-1] + (1 - c[t-1]) * fk[t], i.e. a
+    static joint stays where it was in the previous frame, weighted by its static confidence c.
+    Solved as a parallel prefix scan of the affine recursion x[t] = a[t] * x[t-1] + b[t] (a[0] = 0
+    keeps the first frame). (brawler fork) hard: a confidence above STATIC_CONF counts as 1, so a
+    joint predicted static is held exactly, not with 10-20 % of the network's motion per frame.
 
-    Returns the post-processed (B, L, 63) world-frame body pose (axis-angle).
+    joints: (B, L, J, 3) the static joints' positions; static_conf: (B, L, J) -> (B, L, J, 3)
     """
-    static_conf = static_conf_logits.sigmoid()  # (B, L, J)
-    post_w_j3d, local_mat, _ = decoder.fk(**smplx_global, get_intermediate=True)
-
-    # targets: x[t] = c[t-1] * x[t-1] + (1 - c[t-1]) * fk[t], i.e. a static joint stays where it
-    # was in the previous frame, weighted by its static confidence c. Solved as a parallel prefix
-    # scan of the affine recursion x[t] = a[t] * x[t-1] + b[t] (a[0] = 0 keeps the first frame).
-    post_target_j3d = post_w_j3d.clone()
+    if hard:
+        static_conf = torch.where(static_conf > STATIC_CONF, torch.ones_like(static_conf), static_conf)
     a = torch.cat(
         [torch.zeros_like(static_conf[:, :1, :, None]), static_conf[:, :-1, :, None]], dim=1
     )
-    b = post_w_j3d[:, :, STATIC_JOINT_IDS] * (1 - a)
+    b = joints * (1 - a)
     offset = 1
     while offset < b.shape[1]:
         b = torch.cat([b[:, :offset], b[:, offset:] + a[:, offset:] * b[:, :-offset]], dim=1)
         a = torch.cat([a[:, :offset], a[:, offset:] * a[:, :-offset]], dim=1)
         offset *= 2
-    post_target_j3d[:, :, STATIC_JOINT_IDS] = b
+    return b
+
+
+def static_joint_ik(smplx_global, static_conf_logits, decoder, hard=False):
+    """Inverse kinematics so that ankles, feet and wrists predicted static stay put.
+
+    hard (brawler fork): hold joints with a static confidence above STATIC_CONF exactly, see
+    static_joint_targets. Returns the post-processed (B, L, 63) world-frame body pose (axis-angle).
+    """
+    static_conf = static_conf_logits.sigmoid()  # (B, L, J)
+    post_w_j3d, local_mat, _ = decoder.fk(**smplx_global, get_intermediate=True)
+
+    post_target_j3d = post_w_j3d.clone()
+    post_target_j3d[:, :, STATIC_JOINT_IDS] = static_joint_targets(
+        post_w_j3d[:, :, STATIC_JOINT_IDS], static_conf, hard
+    )
     # a toe predicted static can lie far from where it was when its contact began; pulling it all
     # the way back turns the ankle a lot (tens of degrees), against the network's ankle. Bounded
     # per axis like FlowHMR's ankle targets (github.com/flowhmr/flowhmr, runtime_v2m_postprocess)

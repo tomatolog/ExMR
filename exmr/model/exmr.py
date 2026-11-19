@@ -87,6 +87,7 @@ class ExMR(nn.Module):
         smooth_global=True,
         fps=30.0,
         up_from_camera=False,
+        hard_static_hold=False,
     ):
         """
         Args:
@@ -115,6 +116,9 @@ class ExMR(nn.Module):
                 global_traj.UP_INIT_SECONDS and carried by the camera rotation (cam_angvel),
                 instead of the network's per-frame estimate, which takes a rolling camera for a
                 leaning body (brawler fork, see global_traj.up_from_camera_gv)
+            hard_static_hold: with postprocess, joints predicted static with a confidence above
+                global_traj.STATIC_CONF are held exactly by the IK instead of with the weight of
+                their confidence (brawler fork, see global_traj.static_joint_targets)
         Returns:
             dict with
               smplx_incam: SMPL-X parameters in the camera frame (each (B, L, D))
@@ -225,7 +229,7 @@ class ExMR(nn.Module):
             smplx_global["transl"] = global_traj.snap_to_ground(smplx_global, self.body_model, fps)
         if postprocess:
             smplx_global["body_pose"] = global_traj.static_joint_ik(
-                smplx_global, static_conf_logits, self.decoder
+                smplx_global, static_conf_logits, self.decoder, hard=hard_static_hold
             )
 
         # 5. temporal smoothing, after the IK so that it also smooths the IK's changes
