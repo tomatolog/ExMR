@@ -51,6 +51,7 @@ class Options:
     vo_step: int = 8  # SimpleVO matches every vo_step-th frame, 1 = every frame (brawler fork; upstream 8)
     hard_static_hold: bool = False  # IK holds joints predicted static exactly (brawler fork)
     side_static_hold: bool = False  # IK holds a static foot as a whole, ankle + foot joint (brawler fork)
+    unseen_foot_rule: str = "none"  # contact of feet unseen in the video: none / lower / standing (brawler fork)
     export_fps: float | None = None  # frame rate of the AMASS and BVH files (None: the video's)
     smoothing: str = "global"  # smooth the motion over time: "global" (world frame), "both", "none"
     render: bool = True
@@ -64,6 +65,7 @@ class Options:
             ("vo", ["simplevo", "dpvo"]),
             ("vo_step", list(range(1, 9))),
             ("smoothing", ["global", "both", "none"]),
+            ("unseen_foot_rule", ["none", "lower", "standing"]),
         ]:
             if getattr(self, name) not in choices:
                 raise ValueError(f"Options.{name} must be one of {choices}")
@@ -330,14 +332,16 @@ def _run_model(data, options, fps, assets):
         up_from_camera=options.up_from_camera,
         hard_static_hold=options.hard_static_hold,
         side_static_hold=options.side_static_hold,
+        unseen_foot_rule=options.unseen_foot_rule,
         smooth_incam=options.smoothing == "both",
         smooth_global=options.smoothing != "none",
         fps=fps,
     )
     from exmr.model.global_traj import foot_contacts
 
+    # (brawler fork) with the logits the post-processing used (the unseen-foot rule's contacts)
     contact, foot_height = foot_contacts(
-        out["smplx_global"], out["static_conf_logits"], model.body_model
+        out["smplx_global"], out["static_conf_logits_effective"], model.body_model
     )
     if not options.snap_to_ground:
         _hint_floating_feet(foot_height[contact])
@@ -348,9 +352,15 @@ def _run_model(data, options, fps, assets):
         "smplx_global": {k: v[0].cpu() for k, v in out["smplx_global"].items()},
         "static_conf_logits": out["static_conf_logits"][0].cpu(),
         "foot_contact": contact[0].cpu(),
+        # (brawler fork) the motion before the post-processing and per-frame flags (postprocess_world)
+        "smplx_global_raw": {k: v[0].cpu() for k, v in out["smplx_global_raw"].items()},
+        **{k: out[k][0].cpu() for k in FORK_FLAGS},
         "K_fullimg": data["K_fullimg"],
         "bbx_xyxy": data["bbx_xyxy"],
     }
+
+
+FORK_FLAGS = ("static_conf_logits_effective", "foot_seen", "foot_rule_stance", "foot_hold_source", "foot_ik_shift")
 
 
 def _hint_floating_feet(height):

@@ -89,6 +89,7 @@ class ExMR(nn.Module):
         up_from_camera=False,
         hard_static_hold=False,
         side_static_hold=False,
+        unseen_foot_rule="none",
     ):
         """
         Args:
@@ -123,6 +124,10 @@ class ExMR(nn.Module):
             side_static_hold: with postprocess, a foot predicted static is held as a whole (ankle and
                 foot joint) when its ankle confidence is at least global_traj.SIDE_ANKLE_MIN, with a
                 looser toe bound (brawler fork; implies hard_static_hold)
+            unseen_foot_rule: "none" (default, as upstream) or a rule of
+                global_traj.UNSEEN_FOOT_RULES: a foot whose 2D keypoints are all below
+                global_traj.FOOT_SEEN_CONF (outside the frame or hidden) gets its contact from the rule
+                on the body instead of the network's static confidence (brawler fork)
         Returns:
             dict with
               smplx_incam: SMPL-X parameters in the camera frame (each (B, L, D))
@@ -133,6 +138,10 @@ class ExMR(nn.Module):
                   [L_ankle, L_foot, R_ankle, R_foot, L_wrist, R_wrist]
               up_correction_deg: (B, L) with up_from_camera: the angle between the network's
                   and the carried gravity direction per frame (otherwise zeros)
+              smplx_global_raw: smplx_global before the post-processing (brawler fork)
+              static_conf_logits_effective, foot_seen, foot_rule_stance, foot_hold_source,
+                  foot_ik_shift: per-frame flags of the post-processing, see postprocess_world
+                  (brawler fork)
         """
         B, L = kp2d.shape[:2]
         if length is None:
@@ -218,42 +227,104 @@ class ExMR(nn.Module):
             ),
         }
         static_conf_logits = body_out["static_conf_logits"]
-        if postprocess:
-            if static_cam:
-                smplx_global["transl"] = global_traj.static_cam_transl(
-                    smplx_incam, smplx_global, static_conf_logits, self.decoder, fps
-                )
-            else:
-                smplx_global["transl"] = global_traj.static_joint_transl(
-                    smplx_global, static_conf_logits, self.decoder
-                )
-        # the snap: after the static-joint translation correction, which would cancel it where a
-        # joint is static, and before the IK, which then keeps static joints in place on the result
-        if snap_to_ground:
-            smplx_global["transl"] = global_traj.snap_to_ground(smplx_global, self.body_model, fps)
-        if postprocess:
-            smplx_global["body_pose"] = global_traj.static_joint_ik(
-                smplx_global, static_conf_logits, self.decoder, hard=hard_static_hold,
-                side=side_static_hold,
-            )
-
-        # 5. temporal smoothing, after the IK so that it also smooths the IK's changes
+        # (brawler fork) the world-frame motion before the post-processing, returned so that the
+        # post-processing (postprocess_world) can be re-run without the network
+        smplx_global_raw = {k: v.clone() for k, v in smplx_global.items()}
+        foot_seen = global_traj.feet_seen(kp2d)
+        smplx_global, flags = postprocess_world(
+            smplx_global, smplx_incam, static_conf_logits, foot_seen, self.decoder,
+            self.body_model, fps, postprocess=postprocess, static_cam=static_cam,
+            snap_to_ground=snap_to_ground, smooth_global=smooth_global,
+            hard_static_hold=hard_static_hold, side_static_hold=side_static_hold,
+            unseen_foot_rule=unseen_foot_rule,
+        )
         if smooth_incam:
             smplx_incam = _smooth_motion(smplx_incam, SMOOTHING_SIGMA * fps)
-        if smooth_global:
-            smplx_global = _smooth_motion(smplx_global, SMOOTHING_SIGMA * fps)
-        if postprocess and not snap_to_ground:
-            # one shift for all frames, so last: puts the final mesh on the ground
-            smplx_global["transl"] = global_traj.put_on_ground(smplx_global, self.body_model)
-        if postprocess:
-            # facing +z in the first frame, as BVH, Blender and Unity expect a character to start
-            smplx_global["global_orient"], smplx_global["transl"] = global_traj.face_forward(
-                smplx_global, self.decoder
-            )
 
         return {
             "smplx_incam": smplx_incam,
             "smplx_global": smplx_global,
             "static_conf_logits": static_conf_logits,
             "up_correction_deg": up_correction,
+            "smplx_global_raw": smplx_global_raw,
+            **flags,
         }
+
+
+def postprocess_world(
+    smplx_global,
+    smplx_incam,
+    static_conf_logits,
+    foot_seen,
+    decoder,
+    body_model,
+    fps,
+    postprocess=True,
+    static_cam=False,
+    snap_to_ground=False,
+    smooth_global=True,
+    hard_static_hold=False,
+    side_static_hold=False,
+    unseen_foot_rule="none",
+):
+    """Steps 4b-5 of ExMR.forward on the world-frame motion (brawler fork: one function, so that the
+    post-processing can be re-run without the network on a saved smplx_global_raw).
+
+    smplx_global: the rolled-out world-frame SMPL-X params (smplx_global_raw); smplx_incam: the
+    camera-frame params before any incam smoothing; static_conf_logits: the network's (B, L, 6);
+    foot_seen: (B, L, 2) bool, global_traj.feet_seen of the 2D keypoints.
+    unseen_foot_rule: "none" (as upstream) or a rule of global_traj.UNSEEN_FOOT_RULES giving
+    unseen feet their contact; it acts through the same static logits as the network's own
+    contacts, i.e. on the root translation correction, the IK and the contacts.
+    Returns the post-processed smplx_global and per-frame flags:
+      static_conf_logits_effective (B, L, 6): the logits the post-processing used;
+      foot_seen (B, L, 2) bool; foot_rule_stance (B, L, 2) bool (False with rule "none");
+      foot_hold_source (B, L, 2) int8: global_traj.HOLD_NONE / HOLD_NETWORK / HOLD_UNSEEN_RULE;
+      foot_ik_shift (B, L, 2): how far (m) the IK moved each ankle (0 without postprocess).
+    """
+    smplx_global = dict(smplx_global)
+    B, L = static_conf_logits.shape[:2]
+    if unseen_foot_rule != "none":
+        joints = decoder.fk(**smplx_global)
+        stance = global_traj.unseen_stance(joints, fps, unseen_foot_rule)
+    else:
+        stance = torch.zeros_like(foot_seen)
+    logits, source = global_traj.effective_static_logits(static_conf_logits, foot_seen, stance)
+    ik_shift = torch.zeros(B, L, 2, device=static_conf_logits.device)
+    if postprocess:
+        if static_cam:
+            smplx_global["transl"] = global_traj.static_cam_transl(
+                smplx_incam, smplx_global, logits, decoder, fps
+            )
+        else:
+            smplx_global["transl"] = global_traj.static_joint_transl(smplx_global, logits, decoder)
+    # the snap: after the static-joint translation correction, which would cancel it where a
+    # joint is static, and before the IK, which then keeps static joints in place on the result
+    if snap_to_ground:
+        smplx_global["transl"] = global_traj.snap_to_ground(smplx_global, body_model, fps)
+    if postprocess:
+        before = decoder.fk(**smplx_global)[:, :, 7:9]
+        smplx_global["body_pose"] = global_traj.static_joint_ik(
+            smplx_global, logits, decoder, hard=hard_static_hold, side=side_static_hold,
+        )
+        ik_shift = (decoder.fk(**smplx_global)[:, :, 7:9] - before).norm(dim=-1)
+
+    # 5. temporal smoothing, after the IK so that it also smooths the IK's changes
+    if smooth_global:
+        smplx_global = _smooth_motion(smplx_global, SMOOTHING_SIGMA * fps)
+    if postprocess and not snap_to_ground:
+        # one shift for all frames, so last: puts the final mesh on the ground
+        smplx_global["transl"] = global_traj.put_on_ground(smplx_global, body_model)
+    if postprocess:
+        # facing +z in the first frame, as BVH, Blender and Unity expect a character to start
+        smplx_global["global_orient"], smplx_global["transl"] = global_traj.face_forward(
+            smplx_global, decoder
+        )
+    flags = {
+        "static_conf_logits_effective": logits,
+        "foot_seen": foot_seen,
+        "foot_rule_stance": stance,
+        "foot_hold_source": source,
+        "foot_ik_shift": ik_shift,
+    }
+    return smplx_global, flags

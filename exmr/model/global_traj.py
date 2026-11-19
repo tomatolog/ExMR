@@ -36,6 +36,31 @@ CAMERA_DEAD_BAND = 0.25
 CAMERA_DRIFT_SIGMA = 2.0
 # up_from_camera: the gravity direction is estimated over this many seconds at the start
 UP_INIT_SECONDS = 0.5
+# (brawler fork) unseen feet: a foot is seen where any of its COCO-23 keypoints (ankle, big toe,
+# small toe, heel) has a confidence above FOOT_SEEN_CONF, the body network's own visibility
+# threshold (body_net.py); where it is not seen the network gets no evidence of it and predicts
+# no static confidence, so its contact comes from a rule on the body (UNSEEN_FOOT_RULES) instead
+FOOT_KEYPOINTS = ((15, 17, 18, 19), (16, 20, 21, 22))  # left, right
+FOOT_SEEN_CONF = 0.5
+UNSEEN_FOOT_RULES = ("none", "lower", "standing")
+# a foot given contact by the rule gets this static logit (sigmoid 0.9975, above STATIC_CONF)
+UNSEEN_HOLD_LOGIT = 6.0
+# rule "lower": the lower foot stands (someone always stands unless lying); both feet stand where
+# their lowest joints are within LOWER_BOTH (m); a stance shorter than LOWER_MIN_SECONDS joins its
+# neighbour; no stance where the pelvis is less than LYING_PELVIS (m) above the lower ankle
+LOWER_BOTH = 0.02
+LOWER_MIN_SECONDS = 0.1
+LYING_PELVIS = 0.40
+# rule "standing" (run 2026-11-17-e12-standing-rule-01, feature v2): both feet stand where, within
+# +- STANDING_WINDOW seconds, the ankles keep their distance (STANDING_DIST range, m), direction
+# (STANDING_ANGLE range, deg, where at least STANDING_ANGLE_MIN_DIST apart) and distance from the
+# hip centre (STANDING_RADIUS range, m), the hip line tilts at most STANDING_TILT (deg), for at
+# least STANDING_MIN_SECONDS; ankles smoothed with a Gaussian of STANDING_SIGMA seconds
+STANDING_WINDOW, STANDING_SIGMA, STANDING_MIN_SECONDS = 0.25, 0.042, 0.25
+STANDING_DIST, STANDING_ANGLE, STANDING_ANGLE_MIN_DIST = 0.12, 30.0, 0.10
+STANDING_RADIUS, STANDING_TILT = 0.25, 30.0
+# hold_source codes (per frame and foot)
+HOLD_NONE, HOLD_NETWORK, HOLD_UNSEEN_RULE = 0, 1, 2
 
 
 def up_from_camera_gv(global_orient_gv, global_orient_c, cam_angvel, init_frames):
@@ -294,6 +319,116 @@ def foot_contacts(smplx_global, static_conf_logits, body_model):
     static = torch.stack([conf[..., :2].amax(dim=-1), conf[..., 2:4].amax(dim=-1)], dim=-1)
     lowest = heights[..., 2:] + FOOT_CONTACT_HEIGHT
     return (static > STATIC_CONF) & (heights[..., :2] <= lowest), heights[..., :2]
+
+
+def feet_seen(kp2d):
+    """(brawler fork) (B, L, 2) bool [left, right]: the foot has a keypoint above FOOT_SEEN_CONF.
+
+    kp2d: (B, L, J >= 23, 3) COCO keypoints in pixels [x, y, conf]
+    """
+    return torch.stack(
+        [(kp2d[..., list(ids), 2] > FOOT_SEEN_CONF).any(dim=-1) for ids in FOOT_KEYPOINTS], dim=-1
+    )
+
+
+def _merge_short_runs(labels, min_len):
+    """1D integer labels: a run shorter than min_len takes its previous (else next) run's label."""
+    labels = labels.clone()
+    runs, start = [], 0
+    for t in range(1, len(labels) + 1):
+        if t == len(labels) or labels[t] != labels[start]:
+            runs.append([start, t])
+            start = t
+    for i, (a, b) in enumerate(runs):
+        if b - a < min_len and len(runs) > 1:
+            labels[a:b] = labels[runs[i - 1][0]] if i > 0 else labels[runs[i + 1][0]]
+    return labels
+
+
+def unseen_stance(joints, fps, rule):
+    """(brawler fork) (B, L, 2) bool [left, right]: where the rule gives the foot contact.
+
+    joints: (B, L, 22, 3) world-frame body joints (y up) of the network's motion, before the
+    post-processing (only their relative geometry is used, not the root's drifting path).
+    rule: "lower" or "standing" (see UNSEEN_FOOT_RULES and the constants).
+    """
+    ankles, foot_joints = joints[..., [7, 8], :], joints[..., [10, 11], :]
+    lowest = torch.minimum(ankles[..., 1], foot_joints[..., 1])  # (B, L, 2)
+    lying = joints[..., 0, 1] - lowest.min(dim=-1).values < LYING_PELVIS  # (B, L)
+    if rule == "lower":
+        d = lowest[..., 0] - lowest[..., 1]  # > 0: the left foot is higher
+        labels = torch.where(d.abs() <= LOWER_BOTH, 2, torch.where(d > 0, 1, 0))
+        min_len = max(1, round(LOWER_MIN_SECONDS * fps))
+        labels = torch.stack([_merge_short_runs(lab, min_len) for lab in labels])
+        stance = torch.stack([labels != 1, labels != 0], dim=-1)  # 0 left, 1 right, 2 both
+    elif rule == "standing":
+        sig = STANDING_SIGMA * fps
+        pts = joints[..., [1, 2, 7, 8], :]  # hips, ankles
+        pts = gaussian_smooth(pts.transpose(-3, -1), sig, dim=-1).transpose(-3, -1) if sig > 0.3 else pts
+        hl, hr, al, ar = pts.unbind(dim=-2)
+        centre = (hl + hr) / 2
+        lat = hl - hr
+        tilt = torch.rad2deg(torch.asin((lat[..., 1].abs() / lat.norm(dim=-1).clamp_min(1e-9)).clamp(0, 1)))
+        dv = (al - ar)[..., [0, 2]]
+        dist = dv.norm(dim=-1)
+        theta = torch.rad2deg(torch.atan2(dv[..., 1], dv[..., 0]))
+        r_l = (al - centre)[..., [0, 2]].norm(dim=-1)
+        r_r = (ar - centre)[..., [0, 2]].norm(dim=-1)
+        w = round(STANDING_WINDOW * fps)
+        B, L = dist.shape
+        rows = torch.zeros(B, L, dtype=torch.bool, device=joints.device)
+        for b in range(B):
+            for t in range(L):
+                s = slice(max(0, t - w), min(L, t + w + 1))
+                ok = float(dist[b, s].max() - dist[b, s].min()) <= STANDING_DIST
+                far = dist[b, s] >= STANDING_ANGLE_MIN_DIST
+                if ok and int(far.sum()) >= 2:
+                    th = theta[b, s][far]
+                    diffs = (th - th[0] + 180.0) % 360.0 - 180.0
+                    ok = float(diffs.max() - diffs.min()) <= STANDING_ANGLE
+                ok = ok and float(r_l[b, s].max() - r_l[b, s].min()) <= STANDING_RADIUS
+                ok = ok and float(r_r[b, s].max() - r_r[b, s].min()) <= STANDING_RADIUS
+                rows[b, t] = ok and float(tilt[b, t]) <= STANDING_TILT
+            # one-row gaps merged, then runs of at least STANDING_MIN_SECONDS
+            lab = rows[b].long()
+            gap = (lab[1:-1] == 0) & (lab[:-2] == 1) & (lab[2:] == 1)
+            lab[1:-1][gap] = 1
+            keep = torch.zeros_like(lab)
+            start = None
+            for t in range(L + 1):
+                on = t < L and lab[t] == 1
+                if on and start is None:
+                    start = t
+                elif not on and start is not None:
+                    if (t - start) / fps >= STANDING_MIN_SECONDS:
+                        keep[start:t] = 1
+                    start = None
+            rows[b] = keep.bool()
+        stance = torch.stack([rows, rows], dim=-1)
+    else:
+        raise ValueError(f"unseen foot rule {rule!r}, expected one of {UNSEEN_FOOT_RULES}")
+    return stance & ~lying[..., None]
+
+
+def effective_static_logits(static_conf_logits, seen, stance):
+    """(brawler fork) static logits with the unseen feet's contact from the rule, and the per-frame
+    hold source (B, L, 2) int8 [left, right]: HOLD_NETWORK where the network's confidence of the
+    foot's ankle or foot joint is above STATIC_CONF, HOLD_UNSEEN_RULE where the foot is unseen and the
+    rule gives it contact (and the network does not), else HOLD_NONE.
+    """
+    logits = static_conf_logits.clone()
+    by_rule = ~seen & stance
+    source = torch.zeros(seen.shape, dtype=torch.int8, device=seen.device)
+    for s, (a, f) in enumerate(((0, 1), (2, 3))):
+        net = static_conf_logits[..., [a, f]].sigmoid().amax(dim=-1) > STATIC_CONF
+        for j in (a, f):
+            logits[..., j] = torch.where(
+                by_rule[..., s], logits[..., j].clamp_min(UNSEEN_HOLD_LOGIT), logits[..., j]
+            )
+        source[..., s] = torch.where(
+            net, HOLD_NETWORK, torch.where(by_rule[..., s], HOLD_UNSEEN_RULE, HOLD_NONE)
+        ).to(torch.int8)
+    return logits, source
 
 
 def static_joint_targets(joints, static_conf, hard=False, side=False):

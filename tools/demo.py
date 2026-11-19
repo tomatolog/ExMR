@@ -105,6 +105,14 @@ def main():
         "closer and cost more CPU time; 1 = every frame.",
     )
     parser.add_argument(
+        "--unseen_foot_rule",
+        choices=["none", "lower", "standing"],
+        default="none",
+        help="(brawler fork) contact of a foot unseen in the video (all its 2D keypoints below 0.5): "
+        "'lower' = the lower foot stands, 'standing' = both stand where the feet keep their placement; "
+        "it drives the root correction, the IK and the contacts like the network's own contacts.",
+    )
+    parser.add_argument(
         "--side_static_hold",
         action="store_true",
         help="(brawler fork) hold a foot predicted static as a whole (ankle and foot joint) when its "
@@ -193,6 +201,7 @@ def main():
         up_from_camera=args.up_from_camera,
         hard_static_hold=args.hard_static_hold,
         side_static_hold=args.side_static_hold,
+        unseen_foot_rule=args.unseen_foot_rule,
         vo_step=args.vo_step,
         export_fps=args.export_fps,
         smoothing=args.smoothing,
