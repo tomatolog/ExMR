@@ -21,6 +21,19 @@ from exmr.geometry.rotation_conversions import quaternion_to_matrix
 from exmr.preprocessing.video import frame_paths, frame_size, read_frames
 
 DPVO_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "DPVO"
+# (brawler fork) DPVO's config/default.yaml of the pinned submodule (c0c5a10), embedded: an exmr
+# installed with pip (e.g. from a GitHub archive, as in the ZeroGPU Space) has no third_party/
+DPVO_CONFIG = {
+    "PATCHES_PER_FRAME": 96,
+    "REMOVAL_WINDOW": 22,
+    "OPTIMIZATION_WINDOW": 10,
+    "PATCH_LIFETIME": 13,
+    "KEYFRAME_THRESH": 15.0,
+    "MOTION_MODEL": "DAMPED_LINEAR",
+    "MOTION_DAMPING": 0.5,
+    "MIXED_PRECISION": True,
+    "CENTROID_SEL_STRAT": "RANDOM",
+}
 
 
 class SimpleVO:
@@ -188,6 +201,7 @@ class DPVOOdometry:
         reader.start()
 
         slam = None
+        threads = torch.get_num_threads()  # (brawler fork) DPVO() sets 2 for the whole process
         pbar = tqdm(total=len(paths), desc="DPVO")
         # no_grad is essential: DPVO writes network outputs into persistent buffers, which
         # would otherwise keep every frame's autograd graph alive (memory grows ~0.25 GB/frame)
@@ -200,7 +214,8 @@ class DPVOOdometry:
                     pbar.update()
                     image = torch.from_numpy(image).permute(2, 0, 1).cuda()
                     if slam is None:
-                        cfg.merge_from_file(str(DPVO_ROOT / "config" / "default.yaml"))
+                        # (brawler fork) the embedded default.yaml, see DPVO_CONFIG
+                        cfg.merge_from_list([x for item in DPVO_CONFIG.items() for x in item])
                         cfg.BUFFER_SIZE = self.buffer
                         slam = DPVO(
                             cfg, str(self.checkpoint), ht=image.shape[1], wd=image.shape[2],
@@ -214,6 +229,7 @@ class DPVOOdometry:
             pbar.close()
             stop.set()  # lets the reader exit even if it is blocked on the full queue
             reader.join()
+            torch.set_num_threads(threads)
 
         R_c2w = quaternion_to_matrix(torch.from_numpy(traj[:, [6, 3, 4, 5]]))
         return R_c2w.mT

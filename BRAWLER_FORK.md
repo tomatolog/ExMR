@@ -18,6 +18,11 @@ One fork is used everywhere — the ZeroGPU Space and local runs — so that eve
    - SimpleVO matches every `vo_step`-th frame and interpolates the rotation between them (SLERP). Smaller steps follow fast camera moves (whip pans, a hand-held camera) more closely, at more CPU time.
    - The step is part of the camera-rotation cache key.
 
+4. **DPVO without the submodule** (branch `brawler/dpvo-probe`, not released yet). `DPVOOdometry` runs where exmr is installed with pip and `third_party/` is absent, as in the ZeroGPU Space.
+   - DPVO's `config/default.yaml` of the pinned submodule (c0c5a10) is embedded as `DPVO_CONFIG`. Before, the wrapper read it from `third_party/DPVO/config/default.yaml`, which a pip install does not have.
+   - `DPVO()` sets torch's CPU thread count to 2 for the whole process; the wrapper now restores the previous count when DPVO has finished.
+   - DPVO itself (CUDA extensions, torch-scatter) is installed from wheels built for the Space's torch; see the brawler lab run `2026-11-19-e12-exmr-dpvo-probe-01`.
+
 ## Tests
 
 The tests are CPU-only and need no weights. They are kept in the brawler lab run `2026-11-18-e12-exmr-space-up-01`:
